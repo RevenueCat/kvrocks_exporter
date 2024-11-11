@@ -63,20 +63,12 @@ upload-coverage:
 	go install github.com/mattn/goveralls@v0.0.11
 	/go/bin/goveralls -coverprofile=coverage.txt -service=drone.io
 
+.PHONY: build
+build:
+	go build .
 
+.PHONY: release
+release:
+	go install github.com/goreleaser/goreleaser/v2@latest
 
-BUILD_DT:=$(shell date +%F-%T)
-GO_LDFLAGS:="-s -w -extldflags \"-static\" -X main.BuildVersion=${DRONE_TAG} -X main.BuildCommitSha=${DRONE_COMMIT_SHA} -X main.BuildDate=$(BUILD_DT)" 
-
-.PHONE: build-binaries
-build-binaries:
-	go get github.com/oliver006/gox@master
-
-	rm -rf .build | true
-
-	export CGO_ENABLED=0 ; \
-	gox -os="linux windows freebsd netbsd openbsd"        -arch="amd64 386" -verbose -rebuild -ldflags $(GO_LDFLAGS) -output ".build/redis_exporter-${DRONE_TAG}.{{.OS}}-{{.Arch}}/{{.Dir}}" && \
-	gox -os="darwin solaris illumos"                      -arch="amd64"     -verbose -rebuild -ldflags $(GO_LDFLAGS) -output ".build/redis_exporter-${DRONE_TAG}.{{.OS}}-{{.Arch}}/{{.Dir}}" && \
-	gox -os="linux freebsd netbsd"                        -arch="arm"       -verbose -rebuild -ldflags $(GO_LDFLAGS) -output ".build/redis_exporter-${DRONE_TAG}.{{.OS}}-{{.Arch}}/{{.Dir}}" && \
-	gox -os="linux" -arch="arm64 mips64 mips64le ppc64 ppc64le s390x"       -verbose -rebuild -ldflags $(GO_LDFLAGS) -output ".build/redis_exporter-${DRONE_TAG}.{{.OS}}-{{.Arch}}/{{.Dir}}" && \
-	echo "done"
+	goreleaser release --clean -f .github/goreleaser.yml

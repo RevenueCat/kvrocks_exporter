@@ -36,7 +36,7 @@ func (e *Exporter) extractInfoMetrics(ch chan<- prometheus.Metric, info string, 
 		line = strings.TrimSpace(line)
 		log.Debugf("info: %s", line)
 		if len(line) > 0 && strings.HasPrefix(line, "# ") {
-			if strings.HasPrefix(line, "# Last scan db time") {
+			if strings.HasPrefix(line, "# Last DBSIZE SCAN") {
 				continue
 			}
 			fieldClass = line[2:]
@@ -77,11 +77,12 @@ func (e *Exporter) extractInfoMetrics(ch chan<- prometheus.Metric, info string, 
 			continue
 
 		case "Keyspace":
-			if keysTotal, keysEx, avgTTL, ok := parseDBKeyspaceString(fieldKey, fieldValue); ok {
+			if keysTotal, keysEx, avgTTL, keysExpired, ok := parseDBKeyspaceString(fieldKey, fieldValue); ok {
 				dbName := fieldKey
 
 				e.registerConstMetricGauge(ch, "db_keys", keysTotal, dbName)
 				e.registerConstMetricGauge(ch, "db_keys_expiring", keysEx, dbName)
+				e.registerConstMetricGauge(ch, "db_keys_expired", keysExpired, dbName)
 
 				if avgTTL > -1 {
 					e.registerConstMetricGauge(ch, "db_avg_ttl_seconds", avgTTL, dbName)
@@ -105,6 +106,7 @@ func (e *Exporter) extractInfoMetrics(ch chan<- prometheus.Metric, info string, 
 		if _, exists := handledDBs[dbName]; !exists {
 			e.registerConstMetricGauge(ch, "db_keys", 0, dbName)
 			e.registerConstMetricGauge(ch, "db_keys_expiring", 0, dbName)
+			e.registerConstMetricGauge(ch, "db_keys_expired", 0, dbName)
 		}
 	}
 
@@ -127,9 +129,11 @@ func (e *Exporter) extractInfoMetrics(ch chan<- prometheus.Metric, info string, 
 }
 
 /*
-	valid example: db0:keys=1,expires=0,avg_ttl=0
+valid examples:
+  - db0:keys=1,expires=0,avg_ttl=0
+  - db0:keys=1,expires=10,avg_ttl=0,expired=2
 */
-func parseDBKeyspaceString(inputKey string, inputVal string) (keysTotal float64, keysExpiringTotal float64, avgTTL float64, ok bool) {
+func parseDBKeyspaceString(inputKey string, inputVal string) (keysTotal float64, keysExpiringTotal float64, avgTTL float64, keysExpiredTotal float64, ok bool) {
 	log.Debugf("parseDBKeyspaceString inputKey: [%s] inputVal: [%s]", inputKey, inputVal)
 
 	if !strings.HasPrefix(inputKey, "db") {
@@ -138,7 +142,7 @@ func parseDBKeyspaceString(inputKey string, inputVal string) (keysTotal float64,
 	}
 
 	split := strings.Split(inputVal, ",")
-	if len(split) != 4 {
+	if len(split) < 2 || len(split) > 4 {
 		log.Debugf("parseDBKeyspaceString strings.Split(inputVal) invalid: %#v", split)
 		return
 	}
@@ -162,13 +166,21 @@ func parseDBKeyspaceString(inputKey string, inputVal string) (keysTotal float64,
 		avgTTL /= 1000
 	}
 
+	keysExpiredTotal = 0
+	if len(split) > 3 {
+		if keysExpiredTotal, err = extractVal(split[3]); err != nil {
+			log.Debugf("parseDBKeyspaceString extractVal(split[3]) invalid, err: %s", err)
+			return
+		}
+	}
+
 	ok = true
 	return
 }
 
 /*
-	slave0:ip=10.254.11.1,port=6379,state=online,offset=1751844676,lag=0
-	slave1:ip=10.254.11.2,port=6379,state=online,offset=1751844222,lag=0
+slave0:ip=10.254.11.1,port=6379,state=online,offset=1751844676,lag=0
+slave1:ip=10.254.11.2,port=6379,state=online,offset=1751844222,lag=0
 */
 func parseConnectedSlaveString(slaveName string, keyValues string) (offset float64, ip string, port string, state string, lag float64, ok bool) {
 	ok = false
@@ -249,13 +261,25 @@ func (e *Exporter) handleMetricsReplication(ch chan<- prometheus.Metric, masterH
 }
 
 func (e *Exporter) handleMetricsRocksDB(ch chan<- prometheus.Metric, fieldKey string, fieldValue string) {
+	sharedMetric := []string{"block_cache_usage"}
+	for _, field := range sharedMetric {
+		// format like `block_cache_usage:0`
+		if strings.Compare(fieldKey, field) == 0 {
+			if statValue, err := strconv.ParseFloat(fieldValue, 64); err == nil {
+				e.registerConstMetricGauge(ch, fieldKey, statValue, "-")
+			}
+			// return ASAP
+			return
+		}
+	}
+
 	prefixs := []string{
 		"block_cache_usage", "block_cache_pinned_usage", "index_and_filter_cache_usage", "estimate_keys",
 		"level0_file_limit_slowdown", "level0_file_limit_stop", "pending_compaction_bytes_slowdown",
 		"pending_compaction_bytes_stop", "memtable_count_limit_slowdown", "memtable_count_limit_stop",
 	}
 	for _, prefix := range prefixs {
-		// format like `block_cache_usage[default]:0`
+		// format like `estimate_keys[default]:0`
 		if strings.HasPrefix(fieldKey, prefix) {
 			fields := strings.Split(fieldKey, "[")
 			if len(fields) != 2 {
@@ -266,6 +290,7 @@ func (e *Exporter) handleMetricsRocksDB(ch chan<- prometheus.Metric, fieldKey st
 			if statValue, err := strconv.ParseFloat(fieldValue, 64); err == nil {
 				e.registerConstMetricGauge(ch, metricName, statValue, columnFamily)
 			}
+			return
 		}
 	}
 }
